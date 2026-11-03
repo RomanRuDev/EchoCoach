@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
   <title>EchoCoach - Asistente de entrevista</title>
   <link rel="stylesheet" href="styles.css">
@@ -10,22 +11,22 @@
   <header>
     <h1>EchoCoach</h1>
     <div class="controls">
-      <label class="check"><input type="checkbox" id="showTranscript" checked> Ver transcripciÃ³n</label>
-      <select id="model">
-        <option value="whisper-large-v3-turbo" selected>Groq Turbo (rÃ¡pido)</option>
-        <option value="whisper-large-v3">Groq Large v3 (mÃ¡s preciso)</option>
+      <label class="check"><input type="checkbox" id="showTranscript" checked> Ver transcripción</label>
+      <select id="model" aria-label="Modelo de transcripción">
+        <option value="whisper-large-v3-turbo" selected>Groq Turbo (rápido)</option>
+        <option value="whisper-large-v3">Groq Large v3 (más preciso)</option>
       </select>
-      <select id="interviewleng" title="Idioma de la entrevista">
+      <select id="interviewleng" title="Idioma de la entrevista" aria-label="Idioma de la entrevista">
         <option value="auto">Entrevista: Auto</option>
         <option value="en">Entrevista: English</option>
-        <option value="es">Entrevista: EspaÃ±ol</option>
-        <option value="fr">Entrevista: FranÃ§ais</option>
+        <option value="es">Entrevista: Español</option>
+        <option value="fr">Entrevista: Français</option>
         <option value="de">Entrevista: Deutsch</option>
-        <option value="pt">Entrevista: PortuguÃªs</option>
+        <option value="pt">Entrevista: Português</option>
         <option value="it">Entrevista: Italiano</option>
       </select>
       <button id="toggle">Iniciar</button>
-      <button id="openSettings" class="icon" type="button" title="ConfiguraciÃ³n" aria-label="ConfiguraciÃ³n">
+      <button id="openSettings" class="icon" type="button" title="Configuración" aria-label="Configuración">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3"></circle>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -34,11 +35,11 @@
     </div>
   </header>
   <div class="folderbar">
-    <button id="pickCv" class="secondary">Elegir currÃ­culum (PDF)</button>
+    <button id="pickCv" class="secondary" type="button">Elegir currículum (PDF)</button>
     <span id="cvName"></span>
-    <span class="hint">Tu currÃ­culum se usa para personalizar las respuestas.</span>
+    <span class="hint">Tu currículum se usa para personalizar las respuestas.</span>
   </div>
-  <div id="status">Listo para iniciar</div>
+  <div id="status" role="status" aria-live="polite">Listo para iniciar</div>
   <div class="meter"><div id="level"></div></div>
   <main>
     <section id="transcriptPane">
@@ -63,15 +64,15 @@
   </form>
   <div id="settingsModal" class="modal" hidden>
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-      <h3 id="settingsTitle">ConfiguraciÃ³n</h3>
+      <h3 id="settingsTitle">Configuración</h3>
       <label class="field">
         <span>Tu idioma (mainleng)</span>
         <select id="mainleng">
-          <option value="es">EspaÃ±ol</option>
+          <option value="es">Español</option>
           <option value="en">English</option>
-          <option value="fr">FranÃ§ais</option>
+          <option value="fr">Français</option>
           <option value="de">Deutsch</option>
-          <option value="pt">PortuguÃªs</option>
+          <option value="pt">Português</option>
           <option value="it">Italiano</option>
         </select>
         <small>Las explicaciones, pasos y traducciones te llegan en este idioma. Lo que debes decir en voz alta va en el idioma de la entrevista.</small>
@@ -80,7 +81,7 @@
         <span>API key de Groq</span>
         <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="gsk_...">
         <small id="keyState"></small>
-        <small>ConsÃ­guela gratis en console.groq.com/keys. Se guarda cifrada en este equipo y solo se envÃ­a a Groq.</small>
+        <small>Consíguela gratis en console.groq.com/keys. Se cifra con el almacén seguro del sistema y solo se envía a Groq. Si el almacén no está disponible, configura GROQ_API_KEY en el entorno.</small>
       </label>
       <label class="field">
         <span>Chat LLM</span>
@@ -88,9 +89,9 @@
         <small>Modelo para saludos, preguntas generales y de entrevista.</small>
       </label>
       <label class="field">
-        <span>LLM de programaciÃ³n</span>
+        <span>LLM de programación</span>
         <select id="codeModel"></select>
-        <small>Se usa cuando la pregunta es tÃ©cnica o de cÃ³digo (retos, comandos, errores). Por defecto: openai/gpt-oss-120b. Los cambios aplican a la siguiente respuesta.</small>
+        <small>Se usa cuando la pregunta es técnica o de código (retos, comandos, errores). Por defecto: openai/gpt-oss-120b. Los cambios aplican a la siguiente respuesta.</small>
       </label>
       <div id="settingsMsg" class="msg"></div>
       <div class="actions">
@@ -104,4 +105,3 @@
   <script src="renderer.js"></script>
 </body>
 </html>
-

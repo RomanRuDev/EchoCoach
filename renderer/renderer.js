@@ -184,6 +184,7 @@ function scheduleSuggestion(turn, delay = SUGGEST_DELAY_MS) {
     turn.reqId = reqId;
     turn.answer = '';
     turn.aCard.classList.remove('none');
+    turn.aCard.classList.remove('error');
     turn.aCard.classList.add('pending');
     turn.aBody.textContent = 'Pensando...';
     const history = turns
@@ -268,38 +269,43 @@ function onAudio(data) {
 
 async function start() {
   $('toggle').disabled = true;
-  const res = await window.api.loadModel($('model').value);
-  if (!res.ok) {
-    $('toggle').disabled = false;
-    if (res.needKey) openSettings('Ingresa tu API key de Groq para empezar.');
-    return;
-  }
-
   try {
+    const res = await window.api.loadModel($('model').value);
+    if (!res.ok) {
+      if (res.needKey) openSettings('Ingresa tu API key de Groq para empezar.');
+      return;
+    }
+
     stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+    stream.getVideoTracks().forEach((t) => t.stop());
+    if (!stream.getAudioTracks().length) throw new Error('No se obtuvo pista de audio del sistema.');
+
+    ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    await ctx.audioWorklet.addModule('capture-worklet.js');
+    node = new AudioWorkletNode(ctx, 'capture');
+    node.port.onmessage = (e) => onAudio(e.data);
+    ctx.createMediaStreamSource(stream).connect(node);
+
+    running = true;
+    $('toggle').textContent = 'Detener';
+    $('toggle').classList.add('recording');
+    $('status').textContent = 'Escuchando el audio del escritorio...';
   } catch (err) {
-    $('status').textContent = 'No se pudo capturar el audio: ' + err.message;
+    let message = `No se pudo iniciar: ${err.message}`;
+    node?.disconnect();
+    stream?.getTracks().forEach((track) => track.stop());
+    if (ctx && ctx.state !== 'closed') {
+      try {
+        await ctx.close();
+      } catch (cleanupError) {
+        message += `. También falló la limpieza: ${cleanupError.message}`;
+      }
+    }
+    node = stream = ctx = null;
+    $('status').textContent = message;
+  } finally {
     $('toggle').disabled = false;
-    return;
   }
-  stream.getVideoTracks().forEach((t) => t.stop());
-  if (!stream.getAudioTracks().length) {
-    $('status').textContent = 'No se obtuvo pista de audio del sistema.';
-    $('toggle').disabled = false;
-    return;
-  }
-
-  ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  await ctx.audioWorklet.addModule('capture-worklet.js');
-  node = new AudioWorkletNode(ctx, 'capture');
-  node.port.onmessage = (e) => onAudio(e.data);
-  ctx.createMediaStreamSource(stream).connect(node);
-
-  running = true;
-  $('toggle').textContent = 'Detener';
-  $('toggle').classList.add('recording');
-  $('toggle').disabled = false;
-  $('status').textContent = 'Escuchando el audio del escritorio...';
 }
 
 async function stop() {
@@ -387,13 +393,18 @@ $('saveSettings').onclick = async () => {
   if (!key) { closeSettings(); return; }
   $('saveSettings').disabled = true;
   setMsg('Validando clave...');
-  const r = await window.api.saveKey(key);
-  $('saveSettings').disabled = false;
-  if (!r.ok) { setMsg(r.error); return; }
-  $('apiKey').value = '';
-  setMsg('Clave guardada.', true);
-  await refreshKeyState();
-  setTimeout(closeSettings, 700);
+  try {
+    const r = await window.api.saveKey(key);
+    if (!r.ok) { setMsg(r.error); return; }
+    $('apiKey').value = '';
+    setMsg('Clave guardada.', true);
+    await refreshKeyState();
+    setTimeout(closeSettings, 700);
+  } catch (err) {
+    setMsg(`No se pudo guardar la clave: ${err.message}`);
+  } finally {
+    $('saveSettings').disabled = false;
+  }
 };
 
 $('removeKey').onclick = async () => {
