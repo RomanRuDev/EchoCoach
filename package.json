@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "echocoach",
   "version": "1.0.0",
   "description": "Desktop audio transcription and answer coach for interview practice (Groq)",
@@ -29,5 +29,4 @@
     "pdf-parse": "^2.4.5"
   }
 }
-
 

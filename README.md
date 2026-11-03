@@ -37,7 +37,7 @@ node node_modules\electron\install.js
 
 Elige una de estas opciones:
 
-1. **Desde la app (recomendado):** abre la app, pulsa el engranaje, pega tu clave `gsk_...` y pulsa **Guardar**. Se valida contra Groq y se guarda cifrada en tu equipo.
+1. **Desde la app (recomendado):** abre la app, pulsa el engranaje, pega tu clave `gsk_...` y pulsa **Guardar**. Se valida contra Groq y se cifra con el almacén seguro del sistema. Si el almacén no está disponible, configura `GROQ_API_KEY` en el entorno.
 2. **Archivo `.env`** (solo desarrollo): copia `.env.example` a `.env` y pon tu clave.
 
 ```
@@ -72,7 +72,7 @@ Las imágenes usan `qwen/qwen3.8-27b`. En muchas cuentas de Groq está bloqueado
 ## Límites y privacidad
 
 - El audio transcrito, tu texto, tus capturas y el contenido del currículum se envían a la API de Groq. Revisa sus condiciones antes de usar material sensible.
-- La clave se guarda cifrada con el almacén del sistema. El log de la app está en `%APPDATA%\EchoCoach\app.log`.
+- La clave guardada desde la app se cifra con el almacén del sistema; la alternativa `GROQ_API_KEY`/`.env` depende de que protejas esas fuentes. El log de la app está en `%APPDATA%\EchoCoach\app.log`.
 - El plan gratuito de Groq tiene límite de peticiones por minuto; la app reintenta automáticamente ante un 429.
 - La IA no tiene acceso a tus archivos ni a la consola.
 

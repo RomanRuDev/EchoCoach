@@ -4,10 +4,18 @@ dist/
 out/
 build/
 release/
+artifacts/
 *.exe
 *.msi
 *.blockmap
 *.asar
+*.dmg
+*.pkg
+*.app/
+*.AppImage
+*.deb
+*.rpm
+*.snap
 .electron-builder/
 
 # Secretos y configuración local (API keys)
