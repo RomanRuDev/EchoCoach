@@ -1,0 +1,32 @@
+﻿{
+  "name": "echocoach",
+  "version": "1.0.0",
+  "description": "Desktop audio transcription and answer coach for interview practice (Groq)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0"
+  },
+  "productName": "EchoCoach",
+  "license": "ISC",
+  "build": {
+    "appId": "com.echocoach.app",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "dependencies": {
+    "pdf-parse": "^2.4.5"
+  }
+}
+

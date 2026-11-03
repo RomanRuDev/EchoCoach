@@ -1,0 +1,62 @@
+# Dependencias y builds
+node_modules/
+dist/
+out/
+build/
+release/
+*.exe
+*.msi
+*.blockmap
+*.asar
+.electron-builder/
+
+# Secretos y configuración local (API keys)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+secrets/
+credentials*.json
+settings.json
+
+# Datos personales y de uso
+*.log
+logs/
+app.log
+*.pdf
+*.wav
+*.mp3
+*.mp4
+*.webm
+*.png
+*.jpg
+*.jpeg
+screenshots/
+!build-resources/**
+
+# Caché y temporales
+.cache/
+.tmp/
+tmp/
+*.tmp
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.eslintcache
+coverage/
+
+# Editor y sistema operativo
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
