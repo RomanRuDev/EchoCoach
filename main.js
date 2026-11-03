@@ -32,13 +32,11 @@ function storedKey() {
 
 function saveKey(key) {
   const s = readSettings();
-  if (safeStorage.isEncryptionAvailable()) {
-    s.apiKey = safeStorage.encryptString(key).toString('base64');
-    s.encrypted = true;
-  } else {
-    s.apiKey = key;
-    s.encrypted = false;
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('El almacén seguro del sistema no está disponible. Configura GROQ_API_KEY en el entorno.');
   }
+  s.apiKey = safeStorage.encryptString(key).toString('base64');
+  s.encrypted = true;
   writeSettings(s);
 }
 
@@ -166,7 +164,12 @@ async function captureScreen() {
 
 async function suggest({ id, turn, history = [], question, images = [], interviewLang = 'auto', mainLang = 'es' }) {
   const key = getApiKey();
-  if (!key) return;
+  if (!key) {
+    const message = 'Falta la clave de Groq: configúrala en el engranaje';
+    send('status', { text: message });
+    send('suggestion-error', { id, message });
+    return;
+  }
   images = images.filter((u) => /^data:image\/(jpeg|png|webp);base64,/.test(u)).slice(0, MAX_IMAGES);
   // Solo se cancela la petición previa del mismo turno (pregunta que sigue creciendo).
   if (suggestTurn === turn) suggestAbort?.abort();
