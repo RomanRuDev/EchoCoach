@@ -12,7 +12,7 @@
     "electron-builder": "^26.18.0"
   },
   "productName": "EchoCoach",
-  "license": "ISC",
+  "license": "SEE LICENSE IN LICENSE",
   "build": {
     "appId": "com.echocoach.app",
     "files": [
@@ -29,4 +29,5 @@
     "pdf-parse": "^2.4.5"
   }
 }
+
 
