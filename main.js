@@ -85,7 +85,7 @@ async function transcribe({ audio, language, model }) {
   const form = new FormData();
   form.append('file', new Blob([toWav(new Float32Array(audio))], { type: 'audio/wav' }), 'audio.wav');
   form.append('model', model);
-  form.append('response_format', 'json');
+  form.append('response_format', 'verbose_json');
   form.append('temperature', '0');
   if (language && language !== 'auto' && LANG_NAMES[language]) form.append('language', language);
 
@@ -99,10 +99,90 @@ async function transcribe({ audio, language, model }) {
       continue;
     }
     if (!res.ok) throw new Error(`Groq ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    return ((await res.json()).text || '').trim();
+    return cleanTranscript(await res.json());
   }
   throw new Error('Groq: demasiadas solicitudes (429)');
 }
+
+// Descarta segmentos que Whisper inventa con música, notificaciones u otros sonidos que no son voz.
+function cleanTranscript(json) {
+  const segs = Array.isArray(json.segments) ? json.segments : null;
+  if (!segs) return (json.text || '').trim();
+  const kept = segs.filter((s) => !(s.no_speech_prob > 0.5 || s.avg_logprob < -1 || s.compression_ratio > 2.4 || (s.no_speech_prob > 0.3 && s.avg_logprob < -0.7)));
+  if (kept.length < segs.length) log(`dropped ${segs.length - kept.length}/${segs.length} non-speech segments`);
+  return kept.map((s) => s.text).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// Captura de salida por dispositivo (WASAPI loopback) con un ayudante nativo.
+const { spawn } = require('child_process');
+const helperPath = () => (app.isPackaged ? path.join(process.resourcesPath, 'EchoLoopback.exe') : path.join(__dirname, 'native', 'EchoLoopback.exe'));
+let loopback = null;
+
+function listOutputs() {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(helperPath())) return resolve({ ok: false, outputs: [] });
+    const p = spawn(helperPath(), ['list'], { windowsHide: true });
+    let out = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.on('error', () => resolve({ ok: false, outputs: [] }));
+    p.on('close', (code) => {
+      if (code !== 0) return resolve({ ok: false, outputs: [] });
+      const outputs = out.split('\n').filter(Boolean).map((l) => {
+        const [id, name, def] = l.replace(/\r$/, '').split('\t');
+        return { id, name, isDefault: def === '1' };
+      });
+      resolve({ ok: true, outputs });
+    });
+  });
+}
+
+function stopLoopback() {
+  const p = loopback;
+  loopback = null;
+  if (!p) return;
+  p.removeAllListeners('close');
+  try { p.stdin.end(); } catch {}
+  setTimeout(() => { try { p.kill(); } catch {} }, 500);
+}
+
+function startLoopback(id) {
+  stopLoopback();
+  return new Promise((resolve) => {
+    if (!fs.existsSync(helperPath())) return resolve({ ok: false, error: 'Falta EchoLoopback.exe (ejecuta npm run build:native).' });
+    const p = spawn(helperPath(), ['capture', String(id || 'default')], { windowsHide: true });
+    loopback = p;
+    let started = false;
+    let err = '';
+    let rest = Buffer.alloc(0);
+    p.stderr.on('data', (d) => { err += d; });
+    p.stdout.on('data', (chunk) => {
+      if (!started) { started = true; resolve({ ok: true }); }
+      const buf = Buffer.concat([rest, chunk]);
+      const usable = buf.length - (buf.length % 4);
+      rest = buf.subarray(usable);
+      if (usable) send('loopback-audio', Uint8Array.from(buf.subarray(0, usable)));
+    });
+    p.on('error', (e) => { if (!started) resolve({ ok: false, error: e.message }); });
+    p.on('close', (code) => {
+      if (loopback === p) loopback = null;
+      const message = err.trim() || `El capturador de audio se cerró (código ${code}).`;
+      log(`loopback closed: ${message}`);
+      if (!started) resolve({ ok: false, error: message });
+      else send('loopback-ended', { message });
+    });
+  });
+}
+
+// Conversaciones guardadas: un archivo JSON por conversación.
+const convDir = () => {
+  const dir = path.join(app.getPath('userData'), 'conversations');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+};
+const convFile = (id) => {
+  if (!/^[\w-]{1,64}$/.test(String(id))) throw new Error('Id de conversación no válido');
+  return path.join(convDir(), `${id}.json`);
+};
 
 const CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CHAT_MODEL = 'openai/gpt-oss-120b';
@@ -183,20 +263,20 @@ async function suggest({ id, turn, history = [], question, images = [], intervie
   const system =
     'Eres un coach de práctica para entrevistas técnicas: el usuario se prueba a sí mismo y compara sus respuestas con las tuyas. Cada mensaje del usuario es lo que dice el entrevistador o una petición del usuario (a veces es una transcripción automática con errores). ' +
     'Tus mensajes anteriores son respuestas que ya diste; mantén coherencia y no repitas lo ya dicho. Responde SOLO al último mensaje. ' +
-    'Estilo: lo que sugieres que el usuario diga debe sonar como habla una persona real en una conversación, no como un texto leído: frases cortas, tono cercano y seguro, con un ejemplo concreto de su experiencia cuando exista en su currículum. Evita listas de definiciones, fórmulas como "en resumen" y lenguaje de manual. Usa los términos técnicos correctos y escribe los nombres completos, sin abreviar (por ejemplo "JavaScript", no "JS"; "base de datos", no "BD"). Sin relleno, sin saludos ni despedidas. Markdown breve:\n' +
-    '- Pregunta conceptual: una línea "**Di:**" con 2-4 frases habladas en primera persona, claras y bien explicadas (qué es, cómo funciona y para qué sirve o un ejemplo). Después, solo si aporta, hasta 2 viñetas "**Si profundizan:**" con un punto técnico extra.\n' +
+    'Estilo: escribe como habla una persona de verdad, no como una IA. Frases cortas y directas, tono natural, en primera persona. Máximo 2-3 frases por respuesta hablada: ve al grano, sin introducciones, sin rodeos, sin frases hechas ("es importante destacar", "en resumen", "cabe mencionar", "excelente pregunta"), sin enumerar definiciones ni sonar a manual. Usa contracciones y giros cotidianos del idioma, y un ejemplo breve de su experiencia solo si está en su currículum. Usa los términos técnicos correctos y escribe los nombres completos, sin abreviar (por ejemplo "JavaScript", no "JS"; "base de datos", no "BD"). Sin relleno, sin saludos ni despedidas, sin emojis. Markdown mínimo:\n' +
+    '- Pregunta conceptual: una línea "**Di:**" con 2-3 frases habladas, qué es y para qué sirve o un ejemplo corto. Solo si aporta, una viñeta "**Si profundizan:**" con un punto técnico extra.\n' +
     '- Reto técnico o petición de código (por ejemplo "escribe una función que...", "abre el editor y haz..."): responde con estas secciones, en este orden:\n' +
-    '  1. "**Di:**" lo que el usuario puede decir en voz alta para mostrar que entendió el reto y cuál es su plan, en 2-3 frases naturales y técnicas.\n' +
+    '  1. "**Di:**" lo que el usuario puede decir en voz alta para mostrar que entendió el reto y cuál es su plan, en 1-2 frases naturales.\n' +
     '  2. "**Tu tarea:**" explica en una frase qué debe lograr y con qué entradas y salidas.\n' +
     '  3. "**Paso a paso:**" pasos numerados; cada paso es UNA acción concreta que el usuario hace a mano: indica exactamente qué archivo crear o abrir y qué escribir en él y por qué, y cada comando de terminal en su propio bloque de código (uno por comando, exacto, indicando en qué carpeta ejecutarlo). Tras cada comando di brevemente qué hace y qué debería ver. NO repitas el código completo dentro de los pasos: en el paso de escribirlo, explica sus partes en orden (qué va primero, qué después) y remite a "Código completo".\n' +
     '  4. "**Código completo:**" el código final correcto, completo y ejecutable en un bloque ```lenguaje (sin placeholders; comentarios breves en español solo donde aclaren una decisión).\n' +
     '  5. "**Salida esperada:**" lo que imprime EXACTAMENTE, con el formato real del lenguaje (por ejemplo console.log de un arreglo en Node.js imprime [ 1, 2, 3 ]).\n' +
-    '  6. "**Qué decir mientras lo escribes:**" 2-3 frases naturales para narrar las decisiones clave mientras programa.\n' +
+    '  6. "**Qué decir mientras lo escribes:**" 1-2 frases cortas y naturales para narrar las decisiones clave mientras programa.\n' +
     'Si el usuario pide solo cómo ejecutarlo o un paso concreto, responde solo eso, sin repetir lo anterior. ' +
     'Verifica paso a paso que el código funciona y que la salida esperada es exacta; usa ejemplos con salida DETERMINISTA (evita carreras entre timers, setImmediate e I/O) y, si el orden pudiera variar, dilo. ' +
     `Idiomas. ${interviewRule} El idioma principal del usuario es ${mName}. Regla: (1) todo lo que el usuario deba DECIR en voz alta a otras personas (bloques "Di", frases para narrar, y cualquier comentario o nombre de variable sugerido en voz alta) va en el idioma de la entrevista; (2) todo lo que es para el propio usuario (títulos de sección, "Tu tarea", explicaciones, pasos, notas) va en ${mName}, y escribe los títulos de sección traducidos a ${mName} (por ejemplo "Di"→"Say" si ${mName} es inglés); (3) si el idioma de la entrevista es distinto de ${mName}, justo debajo de cada bloque "Di" y de cada frase para narrar añade una línea en cursiva "**Significa:**" (traducida a ${mName}) con su traducción a ${mName}; si son el mismo idioma, no añadas traducción. El código, los comandos y los nombres técnicos no se traducen. ` +
-    'Saludos, presentaciones, cortesías, agradecimientos, small talk ("encantada de conocerte", "gracias por venir", "¿cómo estás?") y comentarios amables SÍ requieren respuesta: da una "**Di:**" breve (1-2 frases), educada y natural, que corresponda y devuelva la cortesía; si el entrevistador se presenta, usa su nombre y, si el currículum del usuario tiene su nombre, preséntate con él. No inventes datos personales. ' +
-    'Solo responde exactamente [SIN_PREGUNTA] si el mensaje es ruido, una muletilla suelta o un fragmento sin significado ("mm", "ajá", "okay" a solas). ' +
+    'Saludos, presentaciones, cortesías, agradecimientos, small talk ("encantada de conocerte", "gracias por venir", "¿cómo estás?") y comentarios amables SÍ requieren respuesta: da una "**Di:**" de una sola frase corta, cálida y natural, como lo diría una persona, que devuelva la cortesía; si el entrevistador se presenta, usa su nombre y, si el currículum del usuario tiene su nombre, preséntate con él. No inventes datos personales. ' +
+    'Responde exactamente [SIN_PREGUNTA] si el mensaje es ruido, una muletilla suelta, un fragmento sin significado ("mm", "ajá", "okay" a solas), o texto que claramente no viene de una entrevista (letras de canciones, anuncios, subtítulos, créditos, frases sueltas de vídeos o apps). ' +
     'Si el mensaje trae imágenes, son capturas de pantalla o fotos del usuario (enunciados, código, errores, diagramas): léelas con cuidado, transcribe lo relevante y úsalas como contexto principal para responder; si pide cómo resolver o ejecutar algo, sigue el formato de reto técnico. ' +
     'No expliques tu razonamiento.' +
     (cvText ? `\nCurrículum del usuario (úsalo para personalizar las respuestas con su experiencia real, sin inventar datos que no estén aquí):\n${cvText}` : '\nNo hay currículum cargado: no inventes empresas, años, cifras ni logros del usuario; usa respuestas generales o marcadores entre corchetes como [tu experiencia] donde haría falta un dato personal.');
@@ -355,6 +435,44 @@ app.whenReady().then(() => {
     suggest(args);
   });
 
+  ipcMain.handle('conv-list', () => {
+    const out = [];
+    for (const f of fs.readdirSync(convDir())) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const c = JSON.parse(fs.readFileSync(path.join(convDir(), f), 'utf8'));
+        out.push({ id: c.id, title: c.title, updatedAt: c.updatedAt, count: (c.turns || []).length });
+      } catch {}
+    }
+    return out.sort((a, b) => b.updatedAt - a.updatedAt);
+  });
+
+  ipcMain.handle('conv-load', (_e, id) => {
+    try { return JSON.parse(fs.readFileSync(convFile(id), 'utf8')); } catch { return null; }
+  });
+
+  ipcMain.handle('conv-save', (_e, conv) => {
+    const turns = (Array.isArray(conv.turns) ? conv.turns : []).map((t) => ({
+      text: String(t.text || ''), answer: String(t.answer || ''), manual: !!t.manual, images: Number(t.images) || 0,
+    }));
+    const file = convFile(conv.id);
+    let createdAt = Date.now();
+    try { createdAt = JSON.parse(fs.readFileSync(file, 'utf8')).createdAt || createdAt; } catch {}
+    const first = turns.find((t) => t.text)?.text || 'Conversación';
+    const title = first.length > 60 ? `${first.slice(0, 60)}…` : first;
+    fs.writeFileSync(file, JSON.stringify({ id: conv.id, title, createdAt, updatedAt: Date.now(), turns }));
+    return true;
+  });
+
+  ipcMain.handle('conv-delete', (_e, id) => {
+    try { fs.unlinkSync(convFile(id)); } catch {}
+    return true;
+  });
+
+  ipcMain.handle('list-outputs', () => listOutputs());
+  ipcMain.handle('loopback-start', (_e, id) => startLoopback(id));
+  ipcMain.handle('loopback-stop', () => { stopLoopback(); return true; });
+
   ipcMain.handle('capture-screen', async () => {
     try {
       const dataUrl = await captureScreen();
@@ -386,4 +504,5 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+app.on('before-quit', stopLoopback);
 app.on('window-all-closed', () => app.quit());

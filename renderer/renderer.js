@@ -3,7 +3,9 @@ const SAMPLE_RATE = 16000;
 const PAUSE_MS = 500;         // silencio que cierra una frase
 const MAX_UTTERANCE_S = 15;   // corte forzado si alguien habla sin pausa
 const PREROLL_MS = 300;       // audio previo para no cortar el inicio de la palabra
-const MIN_SPEECH_MS = 250;    // ignora ruidos breves
+const MIN_SPEECH_MS = 400;    // ignora ruidos breves (notificaciones, clics)
+const MIN_VOICED_RATIO = 0.35; // la frase debe ser sobre todo voz, no un golpe suelto
+const MIN_LEVEL_VARIATION = 0.2; // la voz varía de volumen; un tono o zumbido constante no
 const TURN_GAP_MS = 5000;     // pausa de audio que separa una pregunta de la siguiente
 const SUGGEST_DELAY_MS = 1200; // espera a ver si la pregunta continúa antes de responder
 const HISTORY_TURNS = 10;     // turnos previos enviados como contexto
@@ -21,6 +23,9 @@ let preroll = [];
 let utterSamples = 0;
 let speechSamples = 0;
 let silenceSamples = 0;
+let levelSum = 0;
+let levelSq = 0;
+let levelN = 0;
 let finalChain = Promise.resolve();
 
 const turns = [];
@@ -44,7 +49,8 @@ function concat(chunks, total) {
 }
 
 // Whisper emite textos entre corchetes/paréntesis, o "you", con ruido o silencio.
-const isNoise = (t) => !t || /^\[.*\]$|^\(.*\)$/.test(t) || /^(you|thanks for watching[.!]?)$/i.test(t.trim().replace(/[.!]$/, ''));
+const HALLUCINATIONS = /subt[ií]tulos|subtitles? by|amara\.org|suscr[ií]be|thanks? for watching|gracias por ver|mbc|www\.|©|^(music|m[uú]sica|applause|aplausos)\b/i;
+const isNoise = (t) => !t || /^\[.*\]$|^\(.*\)$/.test(t) || /^(you|thanks for watching[.!]?)$/i.test(t.trim().replace(/[.!]$/, '')) || HALLUCINATIONS.test(t) || !/[\p{L}\p{N}]/u.test(t);
 
 function makeCard(extraClass, tag) {
   const card = document.createElement('div');
@@ -177,9 +183,11 @@ function addManualQuestion(text, images = []) {
 
 function scheduleSuggestion(turn, delay = SUGGEST_DELAY_MS) {
   clearTimeout(turn.timer);
+  turn.scheduled = true;
   turn.timer = setTimeout(() => {
     // Si aún se está hablando o transcribiendo, la pregunta puede no estar completa.
     if (!turn.manual && (speaking || pendingTranscriptions > 0)) return scheduleSuggestion(turn, 500);
+    turn.scheduled = false;
     const reqId = ++reqSeq;
     turn.reqId = reqId;
     turn.answer = '';
@@ -215,14 +223,25 @@ window.api.onSuggestionDone(({ id }) => {
     turn.aCard.classList.add('none');
     turn.aBody.textContent = 'Sin pregunta detectada';
   }
+  saveConversation();
 });
 
+function looksLikeSpeech() {
+  const spoken = utterSamples - silenceSamples;
+  if (spoken <= 0 || speechSamples / spoken < MIN_VOICED_RATIO) return false;
+  if (levelN < 10) return false;
+  const mean = levelSum / levelN;
+  const sd = Math.sqrt(Math.max(0, levelSq / levelN - mean * mean));
+  return mean > 0 && sd / mean >= MIN_LEVEL_VARIATION;
+}
+
 function finalizeUtterance() {
-  const enough = speechSamples >= (MIN_SPEECH_MS / 1000) * SAMPLE_RATE;
+  const enough = speechSamples >= (MIN_SPEECH_MS / 1000) * SAMPLE_RATE && looksLikeSpeech();
   const audio = enough ? concat(utter, utterSamples) : null;
   const endAt = Date.now() - (silenceSamples / SAMPLE_RATE) * 1000;
   const startAt = endAt - (speechSamples / SAMPLE_RATE) * 1000;
   utter = []; utterSamples = 0; speechSamples = 0; silenceSamples = 0;
+  levelSum = levelSq = levelN = 0;
   speaking = false;
   if (!audio) return;
   const language = $('interviewleng').value;
@@ -241,7 +260,7 @@ function finalizeUtterance() {
 function onAudio(data) {
   const level = rms(data);
   $('level').style.width = Math.min(100, level * 400) + '%';
-  const threshold = Math.max(0.008, noiseFloor * 3);
+  const threshold = Math.max(0.012, noiseFloor * 4);
   const voiced = level > threshold;
   if (!voiced) noiseFloor = noiseFloor * 0.98 + level * 0.02;
 
@@ -259,7 +278,7 @@ function onAudio(data) {
     utterSamples += data.length;
   }
 
-  if (voiced) { speechSamples += data.length; silenceSamples = 0; }
+  if (voiced) { speechSamples += data.length; silenceSamples = 0; levelSum += level; levelSq += level * level; levelN++; }
   else silenceSamples += data.length;
 
   if (silenceSamples >= (PAUSE_MS / 1000) * SAMPLE_RATE || utterSamples >= MAX_UTTERANCE_S * SAMPLE_RATE) {
@@ -276,22 +295,36 @@ async function start() {
       return;
     }
 
-    stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
-    stream.getVideoTracks().forEach((t) => t.stop());
-    if (!stream.getAudioTracks().length) throw new Error('No se obtuvo pista de audio del sistema.');
+    const source = $('audioSource').value;
+    if (source.startsWith('out:')) {
+      usingLoopback = true;
+      const r = await window.api.startLoopback(source.slice(4));
+      if (!r.ok) throw new Error(r.error);
+    } else {
+      if (source === 'system') {
+        stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+        stream.getVideoTracks().forEach((t) => t.stop());
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: source.slice(3) }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+      }
+      if (!stream.getAudioTracks().length) throw new Error('No se obtuvo pista de audio de la fuente elegida.');
 
-    ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-    await ctx.audioWorklet.addModule('capture-worklet.js');
-    node = new AudioWorkletNode(ctx, 'capture');
-    node.port.onmessage = (e) => onAudio(e.data);
-    ctx.createMediaStreamSource(stream).connect(node);
+      ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      await ctx.audioWorklet.addModule('capture-worklet.js');
+      node = new AudioWorkletNode(ctx, 'capture');
+      node.port.onmessage = (e) => onAudio(e.data);
+      ctx.createMediaStreamSource(stream).connect(node);
+    }
 
     running = true;
     $('toggle').textContent = 'Detener';
     $('toggle').classList.add('recording');
-    $('status').textContent = 'Escuchando el audio del escritorio...';
+    $('status').textContent = 'Escuchando ' + $('audioSource').selectedOptions[0].textContent.replace(/ \(predeterminad[oa]\)$/, '') + '...';
   } catch (err) {
     let message = `No se pudo iniciar: ${err.message}`;
+    if (usingLoopback) { usingLoopback = false; window.api.stopLoopback(); }
     node?.disconnect();
     stream?.getTracks().forEach((track) => track.stop());
     if (ctx && ctx.state !== 'closed') {
@@ -308,8 +341,33 @@ async function start() {
   }
 }
 
+// Audio de la salida elegida (ayudante nativo): llega en bloques que se reparten como los del worklet.
+const LOOPBACK_CHUNK = 320;
+let usingLoopback = false;
+let loopbackPending = new Float32Array(0);
+
+window.api.onLoopbackAudio((bytes) => {
+  if (!usingLoopback) return;
+  const n = bytes.byteLength >> 2;
+  const samples = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + n * 4));
+  const all = new Float32Array(loopbackPending.length + n);
+  all.set(loopbackPending);
+  all.set(samples, loopbackPending.length);
+  let o = 0;
+  for (; o + LOOPBACK_CHUNK <= all.length; o += LOOPBACK_CHUNK) onAudio(all.slice(o, o + LOOPBACK_CHUNK));
+  loopbackPending = all.slice(o);
+});
+
+window.api.onLoopbackEnded(({ message }) => {
+  if (!usingLoopback) return;
+  usingLoopback = false;
+  $('status').textContent = `Se perdió la captura de audio: ${message}`;
+  if (running) stop();
+});
+
 async function stop() {
   running = false;
+  if (usingLoopback) { usingLoopback = false; loopbackPending = new Float32Array(0); await window.api.stopLoopback(); }
   node?.disconnect();
   stream?.getTracks().forEach((t) => t.stop());
   await ctx?.close();
@@ -319,10 +377,126 @@ async function stop() {
   $('level').style.width = '0';
   $('toggle').textContent = 'Iniciar';
   $('toggle').classList.remove('recording');
-  $('status').textContent = 'Detenido';
+  $('status').textContent = 'Guardando conversación...';
+  await settleAnswers();
+  await endConversation();
+  $('status').textContent = 'Detenido. Conversación guardada.';
 }
 
-$('toggle').onclick = () => (running ? stop() : start());
+// Conversaciones: se guardan solas y al detener se limpia la pantalla para empezar otra.
+let convId = null;
+
+const snapshot = () => turns
+  .filter((t) => t.text)
+  .map((t) => ({ text: t.text, answer: t.answer && !t.answer.startsWith(NO_QUESTION) ? t.answer : '', manual: t.manual, images: (t.images || []).length }));
+
+async function saveConversation() {
+  const saved = snapshot();
+  if (!saved.length) return;
+  if (!convId) convId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  try { await window.api.saveConversation({ id: convId, turns: saved }); } catch (err) { $('status').textContent = `No se pudo guardar: ${err.message}`; }
+}
+
+// Dispara las respuestas que aún esperan y espera (máx. 30 s) a que terminen.
+async function settleAnswers() {
+  turns.forEach((t) => { if (t.scheduled) scheduleSuggestion(t, 0); });
+  const deadline = Date.now() + 30000;
+  const busy = () => turns.some((t) => t.scheduled || t.aCard.classList.contains('pending'));
+  while (busy() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+}
+
+function clearConversation() {
+  turns.forEach((t) => clearTimeout(t.timer));
+  turns.length = 0;
+  convId = null;
+  lastSpeechEndAt = 0;
+  $('transcriptList').replaceChildren();
+  $('answerList').replaceChildren();
+}
+
+async function endConversation() {
+  await saveConversation();
+  clearConversation();
+}
+
+async function openConversation(id) {
+  const conv = await window.api.loadConversation(id);
+  if (!conv) return;
+  await settleAnswers();
+  await endConversation();
+  convId = conv.id;
+  conv.turns.forEach((s) => {
+    const turn = newTurn(s.manual);
+    turn.text = s.text;
+    turn.answer = s.answer;
+    turn.images = [];
+    turn.qBody.textContent = s.images ? `${s.text} [${s.images} imagen(es)]` : s.text;
+    turn.aCard.classList.remove('pending');
+    if (s.answer) renderMarkdown(turn.aBody, s.answer);
+    else { turn.aCard.classList.add('none'); turn.aBody.textContent = 'Sin respuesta'; }
+  });
+  closeHistory();
+  $('status').textContent = 'Conversación cargada. Puedes seguir preguntando.';
+}
+
+const fmtDate = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+
+async function renderHistory() {
+  const list = $('historyList');
+  list.replaceChildren();
+  const items = await window.api.listConversations();
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = 'Todavía no hay conversaciones guardadas.';
+    list.append(e);
+    return;
+  }
+  items.forEach((c) => {
+    const row = document.createElement('div');
+    row.className = 'item';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const b = document.createElement('b');
+    b.textContent = c.title;
+    const s = document.createElement('small');
+    s.textContent = `${fmtDate(c.updatedAt)} · ${c.count} turnos`;
+    info.append(b, s);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'del';
+    del.textContent = '×';
+    del.title = 'Eliminar';
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      await window.api.deleteConversation(c.id);
+      if (c.id === convId) convId = null;
+      renderHistory();
+    };
+    row.onclick = () => openConversation(c.id);
+    row.append(info, del);
+    list.append(row);
+  });
+}
+
+function openHistory() { $('historyModal').hidden = false; renderHistory(); }
+function closeHistory() { $('historyModal').hidden = true; }
+
+$('openHistory').onclick = openHistory;
+$('closeHistory').onclick = closeHistory;
+$('historyModal').addEventListener('mousedown', (e) => { if (e.target === $('historyModal')) closeHistory(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('historyModal').hidden) closeHistory(); });
+
+$('newConv').onclick = async () => {
+  await settleAnswers();
+  await endConversation();
+  $('status').textContent = running ? 'Escuchando. Conversación nueva.' : 'Listo para una conversación nueva';
+};
+
+$('toggle').onclick = async () => {
+  $('toggle').disabled = true;
+  try { await (running ? stop() : start()); } finally { $('toggle').disabled = false; }
+};
 
 // Idiomas: se recuerdan entre sesiones.
 for (const id of ['interviewleng', 'mainleng']) {
@@ -346,6 +520,8 @@ async function refreshKeyState() {
   const s = await window.api.getSettings();
   $('keyState').textContent = KEY_STATES[s.keySource];
   $('removeKey').hidden = s.keySource !== 'app';
+  // Con clave guardada se muestran puntos; la clave real nunca sale del proceso principal.
+  $('apiKey').placeholder = s.keySource === 'none' ? 'gsk_...' : '•'.repeat(40);
 }
 
 async function loadModels() {
@@ -372,9 +548,39 @@ async function loadModels() {
 $('chatModel').addEventListener('change', () => window.api.setModel('chat', $('chatModel').value));
 $('codeModel').addEventListener('change', () => window.api.setModel('code', $('codeModel').value));
 
+async function loadAudioSources() {
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  // Sin permiso de audio los nombres vienen vacíos; se pide una vez para verlos.
+  if (devices.some((d) => d.kind === 'audioinput' && !d.label)) {
+    try {
+      (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop());
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch {}
+  }
+  const sel = $('audioSource');
+  const saved = localStorage.getItem('audioSource');
+  const { ok, outputs } = await window.api.listOutputs();
+  sel.replaceChildren();
+  if (ok && outputs.length) {
+    const def = outputs.find((o) => o.isDefault);
+    sel.append(new Option(`Salida predeterminada${def ? `: ${def.name}` : ''}`, 'out:default'));
+    outputs.forEach((o) => sel.append(new Option(`Salida: ${o.name}`, `out:${o.id}`)));
+  } else {
+    sel.append(new Option('Salida predeterminada del sistema', 'system'));
+  }
+  devices
+    .filter((d) => d.kind === 'audioinput' && d.deviceId !== 'default' && d.deviceId !== 'communications')
+    .forEach((d, i) => sel.append(new Option(`Entrada: ${d.label || `Dispositivo ${i + 1}`}`, `in:${d.deviceId}`)));
+  sel.value = [...sel.options].some((o) => o.value === saved) ? saved : sel.options[0].value;
+}
+
+$('audioSource').addEventListener('change', () => localStorage.setItem('audioSource', $('audioSource').value));
+loadAudioSources();
+
 async function openSettings(msg = '') {
   $('apiKey').value = '';
   setMsg(msg);
+  loadAudioSources();
   await refreshKeyState();
   $('settingsModal').hidden = false;
   $('apiKey').focus();
@@ -500,4 +706,5 @@ window.api.onSuggestionError(({ id, message }) => {
   turn.aCard.classList.remove('pending');
   turn.aCard.classList.add('error');
   turn.aBody.textContent = message;
+  saveConversation();
 });
